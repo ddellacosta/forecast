@@ -1,14 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE InstanceSigs #-}
-{-# LANGUAGE QuasiQuotes #-}
 
 module Main where
 
+import qualified Control.Applicative as A
 import qualified Control.Exception as E
 import Control.Lens
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
+import Control.Monad.Trans.Maybe
 import Data.Aeson
 import Data.Aeson.Lens
 import qualified Data.ByteString.Lazy as BS
@@ -22,6 +22,7 @@ import qualified Data.Time.LocalTime as LT
 import qualified Data.Time.Format.ISO8601 as UTC 
 import Debug.Trace
 import Network.HTTP.Req
+import System.Directory
 import System.Environment
 import System.IO
 import Text.Pretty.Simple
@@ -31,8 +32,9 @@ import Text.Tabular.AsciiArt as AsciiArt
 import Text.URI
 
 type Address = T.Text
+type CacheString = String
 type ForecastJson = Value
-type ForecastCache = M.Map Address ForecastJson
+type Cache = M.Map Address ForecastJson
 
 userAgent :: Option s
 userAgent = header
@@ -73,9 +75,8 @@ getForecastUrl = preview (key "properties" . key "forecast" . _String)
 
 getLatestForecast :: (Monad m, MonadIO m, MonadHttp m)
                   => Address
-                  -> ForecastCache
                   -> m Value
-getLatestForecast address cache = do
+getLatestForecast address = do
   -- first we get lat/long coordinates we can use with weather.gov via
   -- positionstack.com
   coordsResp <- queryPositionStack address
@@ -115,52 +116,58 @@ tablize forecastJson = table
                  [Group SingleLine $ fmap Header $ stringRow "name"])
                 rows
 
--- shamelessly stolen from https://stackoverflow.com/a/31342939
--- (and tweaked slightly)
-getLines :: Handle -> IO String
-getLines handle = do
-  isEof <- hIsEOF handle
-  if (not isEof)
-    then do
-      line <- (hGetLine handle)
-      pure line <> getLines handle
-    else
-      pure []
+getFirstEntryEndTimeStr :: ForecastJson -> Maybe T.Text
+getFirstEntryEndTimeStr = preview $
+                            key "properties"
+                          . key "periods"
+                          . _Array
+                          . _head
+                          . key "endTime"
+                          . _String
 
-getFirstEntryEndTime :: ForecastJson -> Maybe LT.ZonedTime
-getFirstEntryEndTime forecastJson = UTC.iso8601ParseM
-  $ T.unpack
-  $ fromJust -- dynamic typing simulator
-  $ forecastJson ^? key "properties" . key "periods" . _Array . _head . key "endTime" . _String
-
-getCachedForecastJson :: LT.ZonedTime -> Address -> ForecastCache -> Maybe ForecastJson
+getCachedForecastJson :: LT.ZonedTime -> Address -> Cache -> Maybe ForecastJson
 getCachedForecastJson now address cache = do
   cachedJson <- M.lookup address cache
-  firstEntryEndTime <- getFirstEntryEndTime cachedJson
-  if (LT.zonedTimeToLocalTime firstEntryEndTime > LT.zonedTimeToLocalTime now)
-    then pure cachedJson
-    else Nothing
+  firstEntryEndTimeStr <- getFirstEntryEndTimeStr cachedJson
+  firstEntryEndTime <- UTC.iso8601ParseM $ T.unpack firstEntryEndTimeStr :: Maybe LT.ZonedTime
+  let isNowAfterEndTime = LT.zonedTimeToLocalTime firstEntryEndTime > LT.zonedTimeToLocalTime now
+  cachedJson <$ guard isNowAfterEndTime
 
-doReq :: (Monad m, MonadIO m, MonadHttp m) => Handle -> T.Text -> m ()
-doReq handle address = do
-  cacheString <- liftIO $ getLines handle
-  -- reset position so we can write from beginning
-  liftIO $ hSeek handle AbsoluteSeek 0
-  let cache = maybe M.empty id
-              (R.readMaybe cacheString :: Maybe (M.Map Address ForecastJson))
+getForecast :: (MonadIO m, MonadHttp m) => Address -> Cache -> m ForecastJson
+getForecast address cache = do
   now <- liftIO $ LT.getZonedTime
-  forecastJson <- case (getCachedForecastJson now address cache) of
-                    Just cachedJson -> liftIO $ putStrLn "Using cached JSON response"
-                                        >> pure cachedJson
-                    Nothing         -> (getLatestForecast address cache)
+  forecastJson <- case getCachedForecastJson now address cache of
+                    Just cachedJson -> liftIO $ putStrLn "Using cached JSON"
+                                       >> pure cachedJson
+                    Nothing         -> getLatestForecast address
+  pure forecastJson
+
+readCache' :: CacheString -> Cache
+readCache' cacheString = maybe M.empty id (R.readMaybe cacheString :: Maybe Cache)
+
+readCache :: FilePath -> IO Cache
+readCache filePath = do
+  handle <- openFile filePath ReadWriteMode
+  cacheString <- hGetContents handle
+  let cache = readCache' cacheString
+  when (length cacheString > 0) $ hClose handle
+  pure cache
+
+writeCache :: FilePath -> Cache -> IO ()
+writeCache filePath cache = do
+  writeFile (filePath ++ ".new") $ show cache
+  renameFile (filePath ++ ".new") filePath
+
+doReq :: (Monad m, MonadIO m, MonadHttp m) => T.Text -> m ()
+doReq address = do
+  cache <- liftIO $ readCache ".cache"
+  forecastJson <- getForecast address cache
   liftIO $ putStrLn $ AsciiArt.render id id id $ tablize forecastJson
-  liftIO $ hPutStrLn handle (show $ M.insert address forecastJson cache)
-  liftIO $ hFlush handle
- 
+  let updatedCache = M.insert address forecastJson cache
+  liftIO $ writeCache ".cache" updatedCache
+
 main' :: T.Text -> IO ()
-main' address =
-  withFile ".cache" ReadWriteMode $
-  \handle -> runReq defaultHttpConfig (doReq handle address)
+main' address = runReq defaultHttpConfig (doReq address)
 
 main :: IO ()
 main = do
