@@ -1,6 +1,6 @@
 # Forecast
 
-This is a command-line utility that accepts an address and hits a few APIs--[positionstack](https://positionstack.com) to get address coordinates, and then [api.weather.gov](https://www.weather.gov/documentation/services-web-api)--to get a forecast for that address. It dumps out a forecast for the next few days in a table format. It tries to use a cached copy of the forecast JSON stored for the given address if it exists and we're still within the timestamp window; otherwise it'll try to look the forecast data up by hitting the APIs.
+This is a command-line utility that accepts an address and hits a few APIs: [positionstack](https://positionstack.com) to get address coordinates, and [api.weather.gov](https://www.weather.gov/documentation/services-web-api) to get a forecast for the coordinates. It dumps out the forecast for the next few days in a table format. It tries to use a cached copy of the forecast JSON stored for the given address if it exists and we're still within the timestamp window, otherwise it will try to look the forecast data up by hitting external APIs. This often succeeds.
 
 
 ## Configuration
