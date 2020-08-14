@@ -40,11 +40,10 @@ getCachedForecastJson now address cache = do
 getForecast :: (MonadIO m, MonadHttp m, MonadReader Config m) => Address -> Cache -> m ForecastJson
 getForecast address cache = do
   now <- liftIO $ LT.getZonedTime
-  forecastJson <- case getCachedForecastJson now address cache of
-                    Just cachedJson -> liftIO $ putStrLn "Using cached JSON"
-                                       >> pure cachedJson
-                    Nothing         -> getLatestForecast address
-  pure forecastJson
+  case getCachedForecastJson now address cache of
+    Just cachedJson -> liftIO $ putStrLn "Using cached JSON"
+                       >> pure cachedJson
+    Nothing         -> getLatestForecast address
 
 doReq :: (Monad m, MonadIO m, MonadHttp m, MonadReader Config m) => T.Text -> m ()
 doReq address = do
